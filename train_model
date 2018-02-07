@@ -8,7 +8,6 @@ from sklearn.linear_model import LogisticRegression
 from scipy import sparse
 from MongoDBTemplate import MongoDBTemplate
 from doubanBook_config import *
-from fenci import stopwords_filter
 from sklearn.utils.extmath import density
 from sklearn import metrics
 from sklearn.naive_bayes import BernoulliNB, MultinomialNB
@@ -451,7 +450,17 @@ def find_latestID(collection_name):
     newest_objectID=data[0]['_id']
     return  newest_objectID
 
+# 停用词过滤
+def stopwords_filter(list):
+    stop_word = [(line.decode('utf-8').rstrip()) for line in open(stopwords_file_name, 'rb')]
+    black_word = [(line.decode('utf-8').rstrip()) for line in open(blackwords_file_name, 'rb')]
+    temp_list = []
+    for item in list:
+        if item.word not in stop_word and item.word not in black_word:
+            temp_list.append(item.word)
 
+    result = ' '.join(temp_list)
+    return result
 
 
 def check_and_update_model():
