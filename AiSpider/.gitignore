@@ -1,2 +1,3 @@
 *.pyc
 spider/get_ip_logs/*
+README.md
