@@ -243,6 +243,7 @@ def get_book_data_byID(book_id):
         "#content > div > div.article > div.related_info > section > header > h2 > span > a")
     comment_total_count = soup.select("#content > div > div.article > div.related_info > div.mod-hd > h2 > span.pl > a")
     info=soup.select("#info ")
+    images=soup.select("#mainpic > a > img")
     # content_desc=soup.select("#link-report > div > div.intro")
     # author_desc=soup.select("#content > div > div.article > div.related_info > div.indent > div > div.intro")
     try:
@@ -265,6 +266,8 @@ def get_book_data_byID(book_id):
         # print(9)
         # print(author_desc[0].get_text())
         # print(10)
+        print(deal_images(images[0].get('src')))
+        print(11)
         book = {
             'book_id': book_id,
             'name': name[0].get_text(),
@@ -274,6 +277,7 @@ def get_book_data_byID(book_id):
             'review_total_count': int(get_count(review_total_count[0].get_text())),
             'comment_total_count': int(get_count(comment_total_count[0].get_text())),
             'book_info':deal_info(info[0].get_text()),
+            'images':deal_images(images[0].get('src')),
             'comments': get_book_comments(book_id,sleep_time=2),
             'reviews': get_book_reviews(book_id,sleep_time=2)
         }
@@ -287,7 +291,7 @@ def get_book_data_byID(book_id):
         logger.info(msg)
 
 
-
+#处理书籍的基础信息
 def deal_info(info_str):
     dict_info={}
     temp=""
@@ -314,6 +318,23 @@ def deal_info(info_str):
 
     return dict_info
 
+
+#处理书籍的图片信息
+def deal_images(images_str):
+  imagesList=[]
+  if images_str.find('mpic')!=-1:
+      for s in ['mpic', 'lpic', 'spic']:
+          imagesList.append(images_str.replace('mpic',s))
+  elif images_str.find('lpic')!=-1:
+      for s in ['mpic', 'lpic', 'spic']:
+          imagesList.append(images_str.replace('lpic',s))
+  elif images_str.find('spic')!=-1:
+      for s in ['mpic', 'lpic', 'spic']:
+          imagesList.append(images_str.replace('spic',s))
+  else:
+    logger.info("图片URL地址处理有误 当前图片URL为:  ",images_str)
+
+  return imagesList
 
 
 # json_string=json.dumps(_list, ensure_ascii=False, indent=4)#ensure_ascii=False 输出中文 indent 排版json格式
