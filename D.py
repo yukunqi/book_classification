@@ -62,8 +62,7 @@ def insert_book_comments(collection_name,book_id=None, page=1,page_limit=None, s
         'book_id':book_id,
         'original_book_comment':original_comment
     }
-    print(data_json)
-    #mongo_exe._insert(data_json)
+    mongo_exe._insert(data_json)
 
 #插入书籍评论文章 这里需要分document插入
 def insert_book_reviews(collection_name,book_id=None, page=1,page_limit=None, sleep_time=2,loadsplitsize=3000):
@@ -78,8 +77,7 @@ def insert_book_reviews(collection_name,book_id=None, page=1,page_limit=None, sl
                 'reviews':original_reviews['reviews'][offset:offset+loadsplitsize]
             }
         }
-        print(data_json)
-        #mongo_exe._insert(data_json)
+        mongo_exe._insert(data_json)
         offset+=loadsplitsize
 
 # 获取指定bookID的短评页面
@@ -309,9 +307,9 @@ def get_book_data_byID(book_id):
         msg="insert a book data into mongodb book_id is {}".format(book_id)
         logger.info(msg)
         print(book)
-        #mongo._insert(book)
-        insert_book_comments(collection_name='book_comment',book_id=book_id,sleep_time=2,page_limit=1)
-        insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2,page_limit=1)
+        mongo._insert(book)
+        insert_book_comments(collection_name='book_comment',book_id=book_id,sleep_time=2)
+        insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2)
         msg="insert a book comment and reviews data into mongodb book_id is {}".format(book_id)
         logger.info(msg)
     except IndexError as e:
