@@ -54,7 +54,33 @@ def get_books_data(tag_str, page=1,exclude_collection=None,page_limit=None):
         page = page + 1
 
 
+#插入书籍评论 基本不需要分document 预估过12000条评论大小大概在0.02MB左右
+def insert_book_comments(collection_name,book_id=None, page=1,page_limit=None, sleep_time=2):
+    original_comment=get_book_comments(book_id=book_id, page=page,page_limit=page_limit, sleep_time=sleep_time)
+    mongo_exe=MongoDBTemplate(database_name=book_database_name,collection_name=collection_name)
+    data_json={
+        'book_id':book_id,
+        'original_book_comment':original_comment
+    }
+    print(data_json)
+    #mongo_exe._insert(data_json)
 
+#插入书籍评论文章 这里需要分document插入
+def insert_book_reviews(collection_name,book_id=None, page=1,page_limit=None, sleep_time=2,loadsplitsize=3000):
+    original_reviews=get_book_reviews(book_id=book_id, page=page,page_limit=page_limit, sleep_time=sleep_time)
+    mongo_exe=MongoDBTemplate(database_name=book_database_name,collection_name=collection_name)
+    offset=0
+    while(offset<len(original_reviews['reviews'])):#预估过大概3000条评论文章的大小在12MB左右 需要满足单document小于16MB的限制要求
+        data_json = {
+            'book_id': book_id,
+            'original_book_reviews': {
+                'review_total_count':len(original_reviews['reviews'][offset:offset+loadsplitsize]),
+                'reviews':original_reviews['reviews'][offset:offset+loadsplitsize]
+            }
+        }
+        print(data_json)
+        #mongo_exe._insert(data_json)
+        offset+=loadsplitsize
 
 # 获取指定bookID的短评页面
 def get_book_comments(book_id=None, page=1,page_limit=None, sleep_time=2):
@@ -278,14 +304,16 @@ def get_book_data_byID(book_id):
             'comment_total_count': int(get_count(comment_total_count[0].get_text())),
             'book_info':deal_info(info[0].get_text()),
             'images':deal_images(images[0].get('src')),
-            'comments': get_book_comments(book_id,sleep_time=2),
-            'reviews': get_book_reviews(book_id,sleep_time=2)
         }
 
         msg="insert a book data into mongodb book_id is {}".format(book_id)
         logger.info(msg)
         print(book)
-        mongo._insert(book)
+        #mongo._insert(book)
+        insert_book_comments(collection_name='book_comment',book_id=book_id,sleep_time=2,page_limit=1)
+        insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2,page_limit=1)
+        msg="insert a book comment and reviews data into mongodb book_id is {}".format(book_id)
+        logger.info(msg)
     except IndexError as e:
         msg='当前书籍详细页面有误  url is {} \n\n error is {} \n\n response_data :\n\n  {}'.format(url,e,web_data.text)
         logger.info(msg)
