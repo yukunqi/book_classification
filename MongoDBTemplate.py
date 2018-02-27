@@ -35,16 +35,16 @@ class MongoDBTemplate(object):
         self.client.close()
 
     def _insert(self,data):
-        collection=self.db[book_data_collection_name]
+        collection=self.db[self.collection]
         collection.insert(data)
 
     def find_one(self,kv):
-        collection=self.db[book_data_collection_name]
+        collection=self.db[self.collection]
         return collection.find_one(kv)
 
     def page_query(self,query_filter=None,projection=None,page_size=5,pageNo=1):
         skip=page_size*(pageNo-1)
-        collection=self.db[book_data_collection_name]
+        collection=self.db[self.collection]
         record=collection.find(filter=query_filter,projection=projection).limit(page_size).skip(skip)
         return record
 
