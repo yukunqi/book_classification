@@ -9,7 +9,7 @@ API
 
 import sys
 
-sys.path.append('/')
+1
 from spider.data_save import pipeline
 from db_method import DB
 from flask import Flask, jsonify, request

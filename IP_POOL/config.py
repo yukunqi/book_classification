@@ -15,6 +15,7 @@ thread_num = 50
 sleep_time = 0.5
 retry_times = 10
 time_out = 5
+
 # 当use_proxy为True时，必须在请求的args中或者在配置文件中定义ip, eg: ip="120.52.72.58:80", 否则程序将报错
 use_proxy = False
 ip = None

@@ -85,5 +85,4 @@ def check(when=time.time):
                                                              'response_time': result1}})
 
 if __name__ == '__main__':
-    # check(time.time)
-    print("hello world")
+    check(time.time)

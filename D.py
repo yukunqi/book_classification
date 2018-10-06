@@ -5,6 +5,9 @@ import requests
 import re
 import json
 import time
+import bson
+
+from pymongo.errors import AutoReconnect
 from IP_List import IPs
 from proxy_basic_config import collection_name
 from AiSpider.spider.log_format import spider_log
@@ -13,11 +16,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import random
 from doubanBook_config import *
 from MongoDBTemplate import MongoDBTemplate
+from delete_not_update_ip import check
+from work_spider import execute_spider
 
 
 url_list = ["https://book.douban.com/tag/%E7%BC%96%E7%A8%8B?start={}&type=T".format(str(i)) for i in range(0, 1000, 20)]
 #初始化IP集合对象
 ips = IPs(collection_name)
+# 第一次默认的IP
+ip_port = ips.get_one(1)
 #当前Python文件的logger对象
 logger = spider_log(log_name="getbook")
 mongo = MongoDBTemplate(book_database_name, book_data_collection_name)
@@ -47,7 +54,7 @@ def get_books_data(tag_str, page=1,exclude_collection=None,page_limit=None):
             if rate and float(rate.get_text()) >= 7 and book_id not in book_id_list:
                 msg="ready to get book book_id is {}  rate is {}".format(book_id,rate.get_text())
                 logger.info(msg)
-                res.append(get_book_data_byID(book_id))
+                res.append(get_book_data_from_api_byID(book_id))
         if len(items) == 0 or (page_limit is not None and page >= page_limit):
             break
 
@@ -57,17 +64,18 @@ def get_books_data(tag_str, page=1,exclude_collection=None,page_limit=None):
 #插入书籍评论 基本不需要分document 预估过12000条评论大小大概在0.02MB左右
 def insert_book_comments(collection_name,book_id=None, page=1,page_limit=None, sleep_time=2):
     original_comment=get_book_comments(book_id=book_id, page=page,page_limit=page_limit, sleep_time=sleep_time)
-    mongo_exe=MongoDBTemplate(database_name=book_database_name,collection_name=collection_name)
+
     data_json={
         'book_id':book_id,
         'original_book_comment':original_comment
     }
-    mongo_exe._insert(data_json)
+
+    insert_dataArray(collection_name,data_json)
+    return data_json['original_book_comment']['comments']
 
 #插入书籍评论文章 这里需要分document插入
 def insert_book_reviews(collection_name,book_id=None, page=1,page_limit=None, sleep_time=2,loadsplitsize=3000):
     original_reviews=get_book_reviews(book_id=book_id, page=page,page_limit=page_limit, sleep_time=sleep_time)
-    mongo_exe=MongoDBTemplate(database_name=book_database_name,collection_name=collection_name)
     offset=0
     while(offset<len(original_reviews['reviews'])):#预估过大概3000条评论文章的大小在12MB左右 需要满足单document小于16MB的限制要求
         data_json = {
@@ -77,7 +85,7 @@ def insert_book_reviews(collection_name,book_id=None, page=1,page_limit=None, sl
                 'reviews':original_reviews['reviews'][offset:offset+loadsplitsize]
             }
         }
-        mongo_exe._insert(data_json)
+        insert_dataArray(collection_name,data_json)
         offset+=loadsplitsize
 
 # 获取指定bookID的短评页面
@@ -107,11 +115,11 @@ def get_book_comments(book_id=None, page=1,page_limit=None, sleep_time=2):
             time.sleep(sleep_time)
         except requests.exceptions.ProxyError as e:
             logger.info(e)
-            logger.info("代理异常.... 返回部分数据  " + "  当前页数为...", page)
-            break
+            logger.info("代理异常.... 返回部分数据  " + "  当前页数为... {}".format(page))
+            continue
         except Exception as e:
             logger.info(e)
-            logger.info("发生未知异常，异常发生页面URL为:", url)
+            logger.info("发生未知异常，异常发生页面URL为: {} ".format(url))
             break
 
     dict = {}
@@ -151,6 +159,19 @@ def get_tags_from_page(book_id):
     return list(tags[0].stripped_strings)
 
 
+def insert_dataArray(collection_name,data_arr,MAX_AUTO_RECONNECT_ATTEMPTS=10):
+    for attempt in range(MAX_AUTO_RECONNECT_ATTEMPTS):
+      try:
+        exe=mongo.get_collection_by_collectionName(collection_name)
+        exe.insert(data_arr)
+        return True
+      except AutoReconnect as e:
+        wait_t = 0.5 * pow(2, attempt)
+        logger.warning("PyMongo auto-reconnecting... %s. Waiting %.1f seconds.", str(e), wait_t)
+        time.sleep(wait_t)
+    return False
+
+
 # 分页抓取一本书所有书评页面数据
 def get_book_reviews(book_id, page=1,page_limit=None, sleep_time=2):
     list = []
@@ -177,9 +198,9 @@ def get_book_reviews(book_id, page=1,page_limit=None, sleep_time=2):
             page = page + 1
             time.sleep(sleep_time)
         except requests.exceptions.ProxyError as e:
-            print(e)
-            print("代理异常.... 返回部分数据  " + "  当前页数为...", page)
-            break
+            logger.info(e)
+            logger.info("代理异常.... 返回部分数据  " + "  当前页数为... {}".format(page))
+            continue
     dict={}
     dict['review_total_count']=total_review_count
     dict['reviews']=list
@@ -189,16 +210,15 @@ def get_book_reviews(book_id, page=1,page_limit=None, sleep_time=2):
 # 获取书评页面的相关数据
 def get_review_page(url, sleep_time=1):
     time.sleep(sleep_time)
-    web_data = request_with_proxy(url, True)
-    msg = "success catch book_reivew detail url is {}".format(url)
-    logger.info(msg)
-    soup = BeautifulSoup(web_data.text, 'lxml')
-    title = soup.select("#wrapper > #content > div > div.article > h1 > span")
-    content = soup.select("#link-report > div.review-content.clearfix")
-    useful_count = soup.select("div.main-ft > div > div.main-panel-useful > button.btn.useful_count")
-    useless_count = soup.select("div.main-ft > div > div.main-panel-useful > button.btn.useless_count")
-
     try:
+        web_data = request_with_proxy(url, True)
+        msg = "success catch book_reivew detail url is {}".format(url)
+        logger.info(msg)
+        soup = BeautifulSoup(web_data.text, 'lxml')
+        title = soup.select("#wrapper > #content > div > div.article > h1 > span")
+        content = soup.select("#link-report > div.review-content.clearfix")
+        useful_count = soup.select("div.main-ft > div > div.main-panel-useful > button.btn.useful_count")
+        useless_count = soup.select("div.main-ft > div > div.main-panel-useful > button.btn.useless_count")
         review_data = {
             'title': title[0].get_text(),
             'content': content[0].get_text(),
@@ -208,6 +228,23 @@ def get_review_page(url, sleep_time=1):
     except IndexError as e:
         msg='当前书评页面有误  url is {} \n error is {}'.format(url,e)
         logger.info(msg)
+        review_data = {
+            'title': '',
+            'content': '',
+            'useful_count': 0,
+            'useless_count': 0
+        }
+    except requests.exceptions.ProxyError as e:
+        logger.info(e)
+        review_data = {
+            'title': '',
+            'content': '',
+            'useful_count': 0,
+            'useless_count': 0
+        }
+    except Exception as e:
+        logger.info(e)
+        logger.info("发生未知异常，异常发生页面URL为: {} ".format(url))
         review_data = {
             'title': '',
             'content': '',
@@ -237,26 +274,59 @@ def get_book_data_from_api_byID(book_id,filter_field=None):
     else:
         url = "https://api.douban.com/v2/book/" + book_id + "?fields=" + ','.join(filter_field)
 
-    print(url)
     web_data = request_with_proxy(url, True)
     book_json=web_data.text
-    book_dict=json.loads(book_json)
+    book_obj=json.loads(book_json)
     try:
-        book_dict['comments']=get_book_comments(book_id, page=1,sleep_time=1,page_limit=1)
-        book_dict['reviews']=get_book_reviews(book_id, page=1,sleep_time=1,page_limit=1)
+        book = {
+            'book_id': book_id,
+            'name': book_obj.get('title'),
+            'rate': book_obj.get('rating').get('average'),
+            'rate_people': book_obj.get('rating').get('numRaters'),
+            'tags': [tag.get('name') for tag in book_obj.get('tags')],
+            'machine_label': '0',
+            'book_info': {
+                '作者': getNamefromarr(book_obj.get('author')),
+                '出版社': book_obj.get('publisher'),
+                '出版年': book_obj.get('pubdate'),
+                '页数': book_obj.get('pages'),
+                '定价': book_obj.get('price'),
+                'ISBN': book_obj.get('isbn13')
+            },
+            'images': getImagefromarr(book_obj.get('images'))
+        }
+        print(book)
+        mongo._insert(book)
+        insert_book_comments(collection_name='book_comment',book_id=book_id,sleep_time=2)
+        insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2)
 
         msg="insert a book data into mongodb book_id is {}".format(book_id)
         logger.info(msg)
-        print(book_dict)
-        #mongo._insert(book_json)
     except IndexError as e:
         msg='当前书籍详细页面有误  url is {} \n\n error is {} \n\n response_data :\n\n  {}'.format(url,e,web_data.text)
         logger.info(msg)
 
+# 从json的作者数组中拼接出作者字符串
+def getNamefromarr(names):
+    name = ''
+    for item in names:
+        name = name + item + "/"
+    return name[0:len(name) - 1]
+
+def getImagefromarr(images):
+    medium = images.get('medium')
+    large = images.get('large')
+    small = images.get('small')
+    arr = []
+    arr.append(medium)
+    arr.append(large)
+    arr.append(small)
+    return arr
+
 # 根据书籍ID去获取一本书的详细数据
 def get_book_data_byID(book_id):
     url = "https://book.douban.com/subject/" + book_id + "/"
-    web_data = request_with_proxy(url, True)
+    web_data = request_with_proxy(url, False)
     soup = BeautifulSoup(web_data.text, 'lxml')
     tags = soup.select("#db-tags-section > div.indent")
     name = soup.select("#wrapper > h1 > span")
@@ -271,27 +341,27 @@ def get_book_data_byID(book_id):
     # content_desc=soup.select("#link-report > div > div.intro")
     # author_desc=soup.select("#content > div > div.article > div.related_info > div.indent > div > div.intro")
     try:
-        print(1)
-        print(name[0].get_text())
-        print(2)
-        print(float(rate[0].get_text()))
-        print(3)
-        print(int(rate_people[0].get_text()))
-        print(4)
-        print(list(tags[0].stripped_strings))
-        print(5)
-        print(int(get_count(review_total_count[0].get_text())))
-        print(6)
-        print(int(get_count(comment_total_count[0].get_text())))
-        print(7)
-        print(deal_info(info[0].get_text()))
-        print(8)
+        # print(1)
+        # print(name[0].get_text())
+        # print(2)
+        # print(float(rate[0].get_text()))
+        # print(3)
+        # print(int(rate_people[0].get_text()))
+        # print(4)
+        # print(list(tags[0].stripped_strings))
+        # print(5)
+        # print(int(get_count(review_total_count[0].get_text())))
+        # print(6)
+        # print(int(get_count(comment_total_count[0].get_text())))
+        # print(7)
+        # print(deal_info(info[0].get_text()))
+        # print(8)
         # print(content_desc[0].get_text())
         # print(9)
         # print(author_desc[0].get_text())
         # print(10)
-        print(deal_images(images[0].get('src')))
-        print(11)
+        # print(deal_images(images[0].get('src')))
+        # print(11)
         book = {
             'book_id': book_id,
             'name': name[0].get_text(),
@@ -302,6 +372,7 @@ def get_book_data_byID(book_id):
             'comment_total_count': int(get_count(comment_total_count[0].get_text())),
             'book_info':deal_info(info[0].get_text()),
             'images':deal_images(images[0].get('src')),
+            'machine_label':'2'
         }
 
         msg="insert a book data into mongodb book_id is {}".format(book_id)
@@ -309,7 +380,7 @@ def get_book_data_byID(book_id):
         print(book)
         mongo._insert(book)
         insert_book_comments(collection_name='book_comment',book_id=book_id,sleep_time=2)
-        insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2)
+        #insert_book_reviews(collection_name='book_review',book_id=book_id,sleep_time=2)
         msg="insert a book comment and reviews data into mongodb book_id is {}".format(book_id)
         logger.info(msg)
     except IndexError as e:
@@ -367,10 +438,17 @@ def deal_images(images_str):
 
 
 
-
-
-
-
+def update_ip_pool():
+    logger.info("开始执行更新IP代理池中的IP并从网上抓取新的IP放入池中")
+    print(ips.ipList)
+    start_time = time.time()
+    check()
+    execute_spider()
+    end_time=time.time()
+    logger.info("刷新数据库中IP带内存中来")
+    ips.update_IPLIST()
+    print(ips.ipList)
+    logger.info("IP代理池更新完毕..  使用时间为 {} 秒".format(end_time-start_time))
 
 
 
@@ -397,7 +475,11 @@ def request_with_proxy(url, request_proxy):
         #获取当前时间和之前的初始时间做比较，如果超出自定义的时间则raise requests.exceptions.ProxyError
         end_time=time.time()
         if int(end_time-start_time)>proxy_timeout:
-            msg="request with proxy 方法时间执行过长 可能原因： IP池内IP全部失效或其他异常错误  当前ip为 {}".format(ip_port)
+
+            logger.info("request with proxy 方法时间执行过长 可能原因： IP池内IP全部失效或被目标网站封掉IP其他异常错误  当前ip为 {} 程序进行休息状态 休息时长为: {} 秒".format(ip_port,proxy_timeout))
+            time.sleep(proxy_timeout)
+            update_ip_pool()
+            msg = "IP代理池休息完毕并更新 请重新进行数据抓取 可能原因： 查找历史日志   当前ip为 {}".format(ip_port)
             raise requests.exceptions.ProxyError(msg)
         proxy = {
             'http': ip_port,
@@ -446,25 +528,10 @@ def request_with_proxy(url, request_proxy):
 
 if __name__ == '__main__':
 
-    # 第一次默认的IP
-    ip_port = ips.get_one(1)
-
     # scheduler = BackgroundScheduler()
     # scheduler.add_job(changeip, 'interval', seconds=changeIP_seconds)
     # scheduler.start()
     #
     # 金融 管理 科技 励志 传记 小说 心理学 历史 爱情 养生
-    get_books_data("金融",exclude_collection=['book_rumen','book_jinjie'],page=1,page_limit=5)
-
-
-    #get_book_data_byID("19952400")
-    # field=['rating','subtitle','author','pubdate','tags','origin_title','image','binding','translator','pages','images','id','publisher','alt','isbn10','isbn13','title','url','alt_title','author_intro','summary','price']
-    # get_book_data_from_api_byID("19952400",field)
-
-    #json_data=request_with_proxy("https://book.douban.com/review/8774415/",True)
-    #print(json_data.text)
-
-    # list = get_book_reviews("19952400")
-    # json_string = json.dumps(list, ensure_ascii=False, indent=4)
-    # print(json_string)
-
+    get_books_data("金融",exclude_collection=['books'],page=1,page_limit=5)
+    #get_book_data_byID("26698660")

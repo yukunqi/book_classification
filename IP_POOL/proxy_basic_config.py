@@ -81,13 +81,5 @@ url_parse_dict = {
         'parse_func': 'system'
 
     }
-
-    # 这个是国外的一个网站,如果你的网络无法访问,可以将status改为inactive, 很尴尬, 测了一下,好像都不行,哈哈
-
-    # proxydb
-    # 这个也是国外的一个网站,如果你的网络无法访问,可以将status改为inactive
-    # 这个网站采用的post方法, 需要将submit_data定义好, 采用自定义解析函数, 自定义的请求头
-    # 如果你也遇到变态的网站, 按照这个进行配置即可
-
 }
 

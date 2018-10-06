@@ -19,46 +19,97 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from apscheduler.schedulers.blocking import BlockingScheduler
 import sys
+import jieba
+import bson
 
 # 这里写你自己的框架保存地址
 sys.path.append('F:\PycharmProjects\DEMO1\IP_POOL')
 sys.path.append('F:/PycharmProjects/DEMO1/AiSpider')
 
 #jieba.enable_parallel()
-logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO,filename='log.txt')
+#logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO,filename='log.txt')
 
 
 
-# 从数据库中读取相应collection的一定数量的数据 并打上flag标签标记成一类
-def get_data(collection_name,flag,newestID=None,limit_num=0,filter=None):
+# 从数据库中读取相应collection的一定数量的评论数据 并打上flag标签标记成一类
+def get_data(collection_name,flag,skip_num=0,limit_num=0,filter=None):
     mongo = MongoDBTemplate(book_database_name, collection_name)
-
     collection = mongo.get_collection()
-    data = collection.find(filter=filter,limit=limit_num)
+    pipeline=[{'$lookup':
+        {
+            'from':'book_comment',
+            'localField':'book_id',
+            'foreignField':'book_id',
+            'as':'book_comment_docs'
+        }# 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+    },
+        {'$limit':limit_num},# 限制返回数量
+        {'$skip':skip_num}, #跳过结果的数量
+        #{'$match':filter},# 根据过滤条件查找指定数据
+        {'$project':{'book_id':1,'book_comment_docs.original_book_comment':1}} #指定需要返回的字段
+    ]
+    data = collection.aggregate(pipeline=pipeline)
     comments_list = []
     y_train = []
+    book_idList=[]
+    for item in data:
+        print(item['book_id'])
+        book_idList.append(item['book_id'])
+        for comment in item['book_comment_docs']:
+            list=comment['original_book_comment']['comments']
+            temp=""
+            for index in range(len(list)):
+                line = list[index]
+                line = keep_chinese(line)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp+=content+' '
+            comments_list.append(temp)
+
+    for i in range(len(comments_list)):
+        y_train.append(flag)
+
+    dict_data={}
+    dict_data['data']=comments_list
+    dict_data['target']=y_train
+    dict_data['idList']=book_idList
+
+    return dict_data
+
+def get_new_data(collection_name,flag,newestID=None,skip_num=0,filter=None):
+    mongo = MongoDBTemplate(book_database_name, collection_name)
+    collection = mongo.get_collection()
+    pipeline=[{'$lookup':
+        {
+            'from':'book_comment',
+            'localField':'book_id',
+            'foreignField':'book_id',
+            'as':'book_comment_docs'
+        }# 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+    },
+        {'$skip':skip_num}, #跳过结果的数量
+        {'$match':filter},# 根据过滤条件查找指定数据
+        {'$project':{'book_id':1,'book_comment_docs.original_book_comment':1}} #指定需要返回的字段
+    ]
+    data = collection.aggregate(pipeline=pipeline)
+    comments_list = []
+    y_train = []
+    book_idList=[]
     tempID=newestID
     for item in data:
         print(item['book_id'])
+        book_idList.append(item['book_id'])
         tempID=item['_id']
-        list = item['comments']['comments']
-        review_list=item['reviews']['reviews']
-        temp=""
-        for index in range(len(list)):
-            line = list[index]
-            line = keep_chinese(line)
-            content_list = pseg.cut(line)
-            content = stopwords_filter(content_list)
-            temp+=content+' '
-        comments_list.append(temp)
-
-        # for review in review_list:
-        #     line=review.get('content')
-        #     line = keep_chinese(line)
-        #     content_list = pseg.cut(line)
-        #     content = stopwords_filter(content_list)
-        #     temp += content + ' '
-        # comments_list.append(temp)
+        for comment in item['book_comment_docs']:
+            list=comment['original_book_comment']['comments']
+            temp=""
+            for index in range(len(list)):
+                line = list[index]
+                line = keep_chinese(line)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp+=content+' '
+            comments_list.append(temp)
 
     for i in range(len(comments_list)):
         y_train.append(flag)
@@ -67,6 +118,7 @@ def get_data(collection_name,flag,newestID=None,limit_num=0,filter=None):
     dict_data['data']=comments_list
     dict_data['target']=y_train
     dict_data['newest_id']=tempID
+    dict_data['idList']=book_idList
 
     return dict_data
 
@@ -79,19 +131,32 @@ def iter_get_data_with_pageLimit(collection_name,flag,start_page,end_page,pageSi
     y_train = []
 
     while start_page <= end_page:
-        data = collection.find().skip((start_page-1)*pageSize).limit(pageSize)
+        pipeline = [{'$lookup':
+            {
+                'from': 'book_comment',
+                'localField': 'book_id',
+                'foreignField': 'book_id',
+                'as': 'book_comment_docs'
+            }  # 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+        },
+            {'$limit': pageSize},  # 限制返回数量
+            {'$skip': (start_page-1)*pageSize},  # 跳过结果的数量
+            {'$project': {'book_id': 1, 'book_comment_docs.original_book_comment': 1}}  # 指定需要返回的字段
+        ]
+        data = collection.aggregate(pipeline=pipeline)
         print("page:  ",start_page)
         for item in data:
             print(item['book_id'])
-            list = item['comments']['comments']
-            temp = ""
-            for index in range(len(list)):
-                line = list[index]
-                line = keep_chinese(line)
-                content_list = pseg.cut(line)
-                content = stopwords_filter(content_list)
-                temp += content + ' '
-            comments_list.append(temp)
+            for comment in item['book_comment_docs']:
+                list = comment['original_book_comment']['comments']
+                temp = ""
+                for index in range(len(list)):
+                    line = list[index]
+                    line = keep_chinese(line)
+                    content_list = pseg.cut(line)
+                    content = stopwords_filter(content_list)
+                    temp += content + ' '
+                comments_list.append(temp)
 
         for i in range(len(comments_list)):
             y_train.append(flag)
@@ -119,8 +184,9 @@ def merge_data(dataList):
     return data_dict
 
 def test_read_data_with_sql():
-    train_data_rumen=get_data('book_rumen',limit_num=200,flag=1)
-    train_data_jinjie=get_data('book_jinjie',limit_num=50,flag=2)
+    train_data_rumen=get_data('book_rumen',limit_num=400,flag=1)
+    train_data_jinjie=get_data('book_jinjie',limit_num=400,flag=2)
+
     dataList=[]
     dataList.append(train_data_rumen)
     dataList.append(train_data_jinjie)
@@ -172,6 +238,19 @@ class MySentences(object):
 
 
 def iter_feature_selection_by_word2vecModel(model,trainData,positiveWordList,topN,useExistedModelPath=None):
+
+    if useExistedModelPath is not None:
+        model = models.Word2Vec.load(useExistedModelPath)
+        vocab_len = len(model.wv.vocab)
+        print("model vocab_len is ", vocab_len)
+        value = model.most_similar(positive=positiveWordList, topn=topN - len(positiveWordList))
+        dictionary = []
+        for item in value:
+            dictionary.append(item[0])
+
+        dictionary.extend(positiveWordList)
+        return dictionary
+
     sentences=MySentences(trainData)
     vocab_len = len(model.wv.vocab)
     print("model train finished vocab_len is ", vocab_len)
@@ -207,11 +286,11 @@ def feature_selection_by_word2vecModel(trainData,positiveWordList,topN,useExiste
         return dictionary
 
     sentences=MySentences(trainData)
-    model = models.Word2Vec(sentences=sentences, min_count=3, workers=20, size=400, batch_words=200)
+    model = models.Word2Vec(sentences=sentences, min_count=10, workers=20, size=400, batch_words=200)
     vocab_len = len(model.wv.vocab)
     print("model train finished vocab_len is ",vocab_len)
     # 保存模型
-    model.save('./online/word2vec_once.model')
+    model.save('./online/word2vec_once_with_reviews_10_mincount.model')
     value = model.most_similar(positive=positiveWordList,topn=topN-len(positiveWordList))
     dictionary=[]
     for item in value:
@@ -242,7 +321,7 @@ def Search_for_best(trainData,trainLabel):
 
 def classifier(trainData, testData, trainLabel, testLabel):
 
-    dictionary=feature_selection_by_word2vecModel(trainData,positiveWordList=['入门'],topN=200)
+    dictionary=feature_selection_by_word2vecModel(trainData,positiveWordList=['入门','初学者','通俗易懂','基础'],topN=200,useExistedModelPath='./online/word2vec_once.model')
     print("word2vec:",dictionary)
     feaTrain = word2vec(trainData, dictionary)
     feaTest = word2vec(testData, dictionary)
@@ -334,7 +413,7 @@ def iter_classifer():
         testData_all,testLabel_all=total_data['data'],total_data['target']
 
         for i, (X_train, y_train) in enumerate(minibatch_test_iterators):
-            dictionary = iter_feature_selection_by_word2vecModel(model, X_train, positiveWordList=['入门','初学者','通俗易懂','基础'], topN=200)
+            dictionary = iter_feature_selection_by_word2vecModel(model, X_train, positiveWordList=['入门','初学者','通俗易懂','基础'], topN=200,useExistedModelPath='./online/word2vec_once.model')
             print("word2vec:", dictionary)
             print("word2vecLen: ", len(dictionary))
 
@@ -417,7 +496,7 @@ def benchmark(clf,trainData,trainLabel,testData,testLabel,if_save_model=False):
 
     if if_save_model:
         print("save model: \n")
-        joblib.dump(clf,'./model/'+clf_descr+'_model_'+str(score)+'.pkl')
+        joblib.dump(clf, './online/' + clf_descr + '_model.pkl')
 
     return clf_descr, score, train_time, test_time, pred
 
@@ -436,11 +515,15 @@ def data_shuffle(item):
 
 # 过滤掉英文 字符 标点等符号 只保留中文字符
 def keep_chinese(str):
-    r1 = u'[a-zA-Z0-9’!"#$%&\'()*+,-./:;<=>?@，。?★、…【】《》？“”‘’！[\\]^_`{|}~]+'
-    obj = re.sub(r1,'',str)
-    if obj:
-        return obj
-    else:
+    try:
+        r1 = u'[a-zA-Z0-9’!"#$%&\'()*+,-./:;<=>?@，。?★、…【】《》？“”‘’！[\\]^_`{|}~]+'
+        obj = re.sub(r1,'',str)
+        if obj:
+            return obj
+        else:
+            return ""
+    except Exception as e:
+        print("error occured in keep chinese : {} \n and which str is {}".format(e,str))
         return ""
 
 def find_latestID(collection_name):
@@ -448,18 +531,25 @@ def find_latestID(collection_name):
     collection = mongo.get_collection()
     data = collection.find().sort('_id',-1).limit(1)
     newest_objectID=data[0]['_id']
-    return  newest_objectID
+    return newest_objectID
 
 # 停用词过滤
 def stopwords_filter(list):
-    stop_word = [(line.decode('utf-8').rstrip()) for line in open(stopwords_file_name, 'rb')]
-    black_word = [(line.decode('utf-8').rstrip()) for line in open(blackwords_file_name, 'rb')]
-    temp_list = []
-    for item in list:
-        if item.word not in stop_word and item.word not in black_word:
-            temp_list.append(item.word)
+    try:
+        stop_word = [(line.decode('utf-8').rstrip()) for line in open(stopwords_file_name, 'rb')]
+        black_word = [(line.decode('utf-8').rstrip()) for line in open(blackwords_file_name, 'rb')]
+        temp_list = []
+        for item in list:
+            if item.word not in stop_word and item.word not in black_word:
+                temp_list.append(item.word)
 
-    result = ' '.join(temp_list)
+        result = ' '.join(temp_list)
+    except Exception as e:
+        print(e)
+        print("into exception")
+        result=""
+
+    #print("stop word result:{}".format(result))
     return result
 
 
@@ -468,15 +558,17 @@ def check_and_update_model():
     global newest_objectID_jinjie, newest_objectID_rumen
 
     logging.info("检测并更新模型程序开始执行")
+    print("检测并更新模型程序开始执行")
 
     # 查找比上一次的ID更新的数据　训练最新数据并更新模型　保存最新ID
-    data_rumen=get_data('book_rumen',flag=0,filter={'_id': {'$gt': newest_objectID_rumen}},newestID=newest_objectID_rumen)
-    data_jinjie=get_data('book_jinjie', flag=1, filter={'_id': {'$gt': newest_objectID_jinjie}},newestID=newest_objectID_jinjie)
+    data_rumen=get_new_data('book_rumen',flag=0,filter={'_id': {'$gt': newest_objectID_rumen}},newestID=newest_objectID_rumen)
+    data_jinjie=get_new_data('book_jinjie', flag=1, filter={'_id': {'$gt': newest_objectID_jinjie}},newestID=newest_objectID_jinjie)
 
     # 没有新增数据进行训练 等待下一次执行
-    # if len(data_rumen['data']) == 0 and len(data_jinjie['data']) == 0:
-    #     logging.info("检测完毕，没有新增数据 等待下一执行周期")
-    #     return
+    if len(data_rumen['data']) == 0 and len(data_jinjie['data']) == 0:
+        logging.info("检测完毕，没有新增数据 等待下一执行周期")
+        print("检测完毕，没有新增数据 等待下一执行周期")
+        return
 
     dataList = []
     dataList.append(data_rumen)
@@ -511,19 +603,30 @@ def iter_get_all_data(collection_name,flag,batch_size=None):
     collection = mongo.get_collection()
     comments_list = []
     y_train = []
-    data = collection.find()
+    pipeline=[{'$lookup':
+        {
+            'from':'book_comment',
+            'localField':'book_id',
+            'foreignField':'book_id',
+            'as':'book_comment_docs'
+        }# 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+    },
+        {'$project':{'book_id':1,'book_comment_docs.original_book_comment':1}} #指定需要返回的字段
+    ]
+    data = collection.aggregate(pipeline=pipeline,maxTimeMS=1200000)
     count=0
     for item in data:
         print(item['book_id'])
-        list = item['comments']['comments']
-        temp = ""
-        for index in range(len(list)):
-            line = list[index]
-            line = keep_chinese(line)
-            content_list = pseg.cut(line)
-            content = stopwords_filter(content_list)
-            temp += content + ' '
-        comments_list.append(temp)
+        for comment in item['book_comment_docs']:
+            list=comment['original_book_comment']['comments']
+            temp=""
+            for index in range(len(list)):
+                line = list[index]
+                line = keep_chinese(line)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp+=content+' '
+            comments_list.append(temp)
 
         count += 1
 
@@ -618,13 +721,145 @@ def online_testing(dictionary, clf, testData, testLabel):
         print("dimensionality: %d" % clf.coef_.shape[1])
         print("density: %f" % density(clf.coef_))
 
+def getReviewByBookID(collection_name,filter):
+    mongo = MongoDBTemplate(book_database_name, collection_name)
+    collection = mongo.get_collection()
+    pipeline=[{'$lookup':
+        {
+            'from':'book_review',
+            'localField':'book_id',
+            'foreignField':'book_id',
+            'as':'book_review_docs'
+        }# 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+    },
+        {'$match':filter},
+        {'$project':{'book_id':1,'book_review_docs.original_book_reviews':1}} #指定需要返回的字段
+    ]
+    data = collection.aggregate(pipeline=pipeline)
+    reviews_list = []
+
+    for item in data:
+        print(item['book_id'])
+        for comment in item['book_review_docs']:
+            list=comment['original_book_reviews']['reviews']
+            temp=""
+            for index in range(len(list)):
+                line = list[index]
+                line = keep_chinese(line)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp+=content+' '
+            reviews_list.append(temp)
+
+    dict_data={}
+    dict_data['data']=reviews_list
+    return dict_data
+
+def getDataByBookID(collection_name,filter):
+
+    mongo = MongoDBTemplate(book_database_name, collection_name)
+    collection = mongo.get_collection()
+    pipeline=[{'$lookup':
+        {
+            'from':'book_comment',
+            'localField':'book_id',
+            'foreignField':'book_id',
+            'as':'book_comment_docs'
+        }# 联合查询 把collectionName的表和book_comment表联合查找相应书籍的评论数据
+    },
+        {'$match':filter},
+        {'$project':{'book_id':1,'book_comment_docs.original_book_comment':1}} #指定需要返回的字段
+    ]
+    data = collection.aggregate(pipeline=pipeline)
+    comments_list = []
+
+    for item in data:
+        print(item['book_id'])
+        for comment in item['book_comment_docs']:
+            list=comment['original_book_comment']['comments']
+            temp=""
+            for index in range(len(list)):
+                line = list[index]
+                line = keep_chinese(line)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp+=content+' '
+            comments_list.append(temp)
+
+    dict_data={}
+    dict_data['data']=comments_list
+    return dict_data
+
+# 根据模型的预测数据去更新训练模型，测试模型的指标
+def test_model_train_byPredictData():
+    # 首先测试模型的性能
+    test_data_rumen=get_data('book_rumen',flag=1,skip_num=380,limit_num=120)
+    test_dat_jinjie=get_data('book_jinjie',flag=2,skip_num=380,limit_num=120)
+
+    dataList = []
+    dataList.append(test_data_rumen)
+    dataList.append(test_dat_jinjie)
+    total_data = merge_data(dataList)
+    total_data = data_shuffle(total_data)  # 打乱数据样本 保证数据样本随机性
+    dictonary=feature_selection_by_word2vecModel(trainData=None,positiveWordList=['入门','初学者','通俗易懂','基础'],topN=200,useExistedModelPath='./online/word2vec_once.model')
+
+    try:
+        clf_Ber=joblib.load('./online/BernoulliNB_model.pkl')
+        clf_muti=joblib.load('./online/MultinomialNB_model.pkl')
+        online_testing(dictonary,clf_Ber,total_data['data'],total_data['target'])
+        online_testing(dictonary, clf_muti, total_data['data'], total_data['target'])
+
+        # 利用部分数据进行预测，将预测结果再训练更新模型
+        test_data_rumen = get_data('book_rumen', flag=1, skip_num=300, limit_num=80)
+        test_dat_jinjie = get_data('book_jinjie', flag=2, skip_num=300, limit_num=80)
+        dataList = []
+        dataList.append(test_data_rumen)
+        dataList.append(test_dat_jinjie)
+        total_data1 = merge_data(dataList)
+        total_data1 = data_shuffle(total_data1)  # 打乱数据样本 保证数据样本随机性
+        feaTest = word2vec(total_data1['data'], dictonary)
+
+        arr1=clf_muti.predict(feaTest)
+
+        # 更新样本标签
+        for index in range(len(arr1)):
+
+            if total_data1['target'][index]!=arr1[index]:
+                print('original label:{} predict label: {} bookId : {}'.format(total_data1['target'][index],arr1[index],total_data1['idList'][index]))
+            total_data1['target'][index]=arr1[index]
+
+        #增量学习
+        clf_muti.partial_fit(feaTest, total_data1['target'], classes=[1,2])
+
+        online_testing(dictonary,clf_muti,total_data['data'],total_data['target'])
+
+    except FileNotFoundError as e:
+        print(e)
+
+def move_data():
+    mongo = MongoDBTemplate(book_database_name,'book_jinjie')
+    mongo_comment=mongo.get_collection_by_collectionName('book_review')
+
+    collection = mongo.get_collection()
+    data = collection.find(filter=None,skip=0,projection=['book_id','reviews'],no_cursor_timeout=True)
+
+
+    for item in data:
+        tempID=item['book_id']
+        print(tempID)
+        list = item['reviews']
+        bson={'book_id':tempID,'original_book_reviews':list}
+        mongo_comment.insert(bson)
+        collection.update_one(filter={'book_id':tempID},update={'$unset':{'reviews':'','review_total_count':''}})
+
 
 
 
 if __name__ == '__main__':
 
-    # test_read_data_with_sql() # 一次性训练
+    #test_read_data_with_sql() # 一次性训练
     iter_classifer()# 增量迭代训练
+    # test_model_train_byPredictData()
 
     # newest_objectID_rumen=find_latestID('book_rumen')
     # newest_objectID_jinjie=find_latestID('book_jinjie')
@@ -633,4 +868,23 @@ if __name__ == '__main__':
     # scheduler.add_job(check_and_update_model, 'interval', minutes=10)
     # scheduler.start()
 
+    #book_data=getDataByBookID('book_rumen',filter={'book_id':'1045818'})
+
+    # 计算一个document的占用空间大小
+    # encoded=bson.BSON.encode(document=book_data)
+    # max_bson_size=len(encoded)
+    # print(' %d bytes' % max_bson_size)
+
+    # dictonary=feature_selection_by_word2vecModel(trainData=None,positiveWordList=['入门','初学者','通俗易懂','基础'],topN=200,useExistedModelPath='./online/word2vec_once.model')
+    # print(dictonary)
+    # feaTest=word2vec(book_data['data'],dictonary)
+    # try:
+    #     clf_Ber=joblib.load('./online/BernoulliNB_model.pkl')
+    #     clf_muti=joblib.load('./online/MultinomialNB_model.pkl')
+    #
+    #     print(clf_Ber.predict(feaTest))
+    #     print(clf_muti.predict(feaTest))
+    # except FileNotFoundError as e:
+    #     print(e)
+    #get_data('book_rumen',flag=1,skip_num=0,limit_num=10)
 

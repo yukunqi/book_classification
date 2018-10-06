@@ -21,8 +21,8 @@ class MongoDBTemplate(object):
 
     def _connect(self):
         try:
-            self.client = pymongo.MongoClient(self.host,self.port, serverSelectionTimeoutMS=database_connect_time_out,connectTimeoutMS=database_connect_time_out)
-            self.client.server_info()
+            self.client = pymongo.MongoClient(self.host,self.port, serverSelectionTimeoutMS=database_connect_time_out,connectTimeoutMS=database_connect_time_out,connect=False)
+            self.client.admin.command("ismaster")
             msg = 'host: {}  port:  {}  database_name : {}   MongoDB数据库连接成功'.format(host, port, self.database)
             logger.info(msg)
 
