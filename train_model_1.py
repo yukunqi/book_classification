@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import re
 import jieba.posseg as pseg
 import logging
@@ -14,12 +16,9 @@ from sklearn.svm import LinearSVC
 from sklearn.externals import joblib
 import random
 from gensim import models
-from sklearn.model_selection import GridSearchCV
-from sklearn.pipeline import Pipeline
-from apscheduler.schedulers.blocking import BlockingScheduler
-import sys
-import jieba
-import bson
+from sklearn.model_selection import cross_val_score,cross_validate
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
 
 #迭代获得全部数据
 def iter_get_all_data(collection_name,flag,batch_size=None):
@@ -58,6 +57,37 @@ def iter_get_all_data(collection_name,flag,batch_size=None):
         y_train.append(flag)
 
     yield comments_list, y_train
+
+
+#获取一定数量的数据
+def get_data(collection_name,flag,skip_num=0,limit_num=0,filter=None):
+    mongo = MongoDBTemplate(book_database_name, collection_name)
+    collection = mongo.get_collection()
+    comments_list = []
+    y_train = []
+    idList=collection.find({'machine_label':str(flag)},projection=['book_id']).skip(skip_num).limit(limit_num)
+    comment_collection=mongo.get_collection_by_collectionName('book_comment')
+    for item in idList:
+        current_id=item['book_id']
+        print(current_id)
+        com=comment_collection.find({'book_id':current_id},projection=['original_book_comment'],no_cursor_timeout=True)
+        temp = ""
+        for obj in com:
+            comments=obj['original_book_comment']['comments']
+            for comment in comments:
+                line = keep_chinese(comment)
+                content_list = pseg.cut(line)
+                content = stopwords_filter(content_list)
+                temp += content + ' '
+
+        comments_list.append(temp)
+
+    for i in range(len(comments_list)):
+        y_train.append(flag)
+
+    return comments_list, y_train
+
+
 
 
 def merge_data(dataList):
@@ -107,6 +137,9 @@ def word2vec(words,dictionary):
     msgRow = []
     characterCol = []
     value = []
+
+    print("word : {}".format(words))
+
     for i in range(len(words)):
          for word in words[i].split():
             if word in voc:
@@ -115,6 +148,8 @@ def word2vec(words,dictionary):
                 value.append(1)
 
 
+    print(msgRow)
+    print(characterCol)
     fea = sparse.coo_matrix((value,(msgRow,characterCol)),shape=(len(words),len(dictionary))).tocsr()
     return fea
 
@@ -167,13 +202,18 @@ def iter_feature_selection_by_word2vecModel(model,trainData,positiveWordList,top
         return dictionary
 
     sentences=MySentences(trainData)
+    print(len(trainData))
     vocab_len = len(model.wv.vocab)
+    print(sentences.wordList)
     print("model train finished vocab_len is ", vocab_len)
     if vocab_len == 0:
+        print("build vocab")
         model.build_vocab(sentences=sentences,update=False)
     else:
         model.build_vocab(sentences=sentences, update=True)
 
+    vocab_len = len(model.wv.vocab)
+    print("model train finished vocab_len is ", vocab_len)
     model.train(sentences=sentences, total_examples=model.corpus_count, epochs=model.iter)
     #模型保存
     # model.save('./online/word2vec.model')
@@ -265,7 +305,7 @@ def iter_classifer():
         testData_all,testLabel_all=total_data['data'],total_data['target']
 
         for i, (X_train, y_train) in enumerate(minibatch_test_iterators):
-            dictionary = iter_feature_selection_by_word2vecModel(model, X_train, positiveWordList=['入门','初学者','通俗易懂','基础'], topN=200,useExistedModelPath='./online/word2vec_once.model')
+            dictionary = iter_feature_selection_by_word2vecModel(model, X_train, positiveWordList=['入门','初学者','通俗易懂','基础'], topN=200,useExistedModelPath='./online/word2vec.model')
             print("word2vec:", dictionary)
             print("word2vecLen: ", len(dictionary))
 
@@ -302,5 +342,184 @@ def iter_classifer():
                 # joblib.dump(clf, './online/' + clf_descr + '_model.pkl')
 
 
+def build_word2vec_model():
+    train_data_rumen = iter_get_all_data(collection_name='books', flag=1, batch_size=100)
+    model = models.Word2Vec(sentences=None, min_count=3, workers=20, size=400, batch_words=200)
+    for i,(x_train,y_train) in enumerate(train_data_rumen):
+        sentences = MySentences(x_train)
+        vocab_len = len(model.wv.vocab)
+        print("model train finished vocab_len is ", vocab_len)
+        if vocab_len == 0:
+            model.build_vocab(sentences=sentences, update=False)
+        else:
+            model.build_vocab(sentences=sentences, update=True)
+        model.train(sentences=sentences, total_examples=model.corpus_count, epochs=model.iter)
+
+    model.save('./online/word2vec.model')
+
+
+def cross_validation(total_example_num=500):
+    train_data_rumen = iter_get_all_data(collection_name='books', flag=1, batch_size=50)
+    train_data_jinjie = iter_get_all_data(collection_name='books', flag=2, batch_size=20)
+
+    rumen_stop_flag = 0
+    jinjie_stop_flag = 0
+    dic = []
+    classif = None
+    testData_all = []
+    testLabel_all = []
+    dataList = []
+    model = models.Word2Vec(sentences=None, min_count=3, workers=20, size=400, batch_words=200)
+    # clf = BernoulliNB(alpha=0.0001)
+    # Here are some classifiers that support the `partial_fit` method
+    partial_fit_classifiers = {
+        'MultinomialNB': MultinomialNB(alpha=0.0001),
+        'BernoulliNB': BernoulliNB(alpha=0.0001)
+    }
+
+    while True:
+        rumen_data = None
+        jinjie_data = None
+        rumenLabel=None
+        jinjieLabel=None
+        if rumen_stop_flag == 0:
+            try:
+                rumen_data, rumenLabel = train_data_rumen.__next__()
+            except StopIteration as e:
+                print("入门数据用完")
+                rumen_stop_flag=1
+
+        if jinjie_stop_flag == 0:
+            try:
+                jinjie_data, jinjieLabel = train_data_jinjie.__next__()
+            except StopIteration as e:
+                print("进阶数据用完")
+                jinjie_stop_flag=1
+
+
+        if rumen_stop_flag==1 and jinjie_stop_flag == 1:
+            print("所有数据使用完毕")
+            return dic,classif
+
+
+        if rumen_data is not None and rumenLabel is not None:
+            temp_dict={}
+            temp_dict['data']=rumen_data
+            temp_dict['target']=rumenLabel
+            dataList.append(temp_dict)
+
+        if jinjie_data is not None and jinjieLabel is not None:
+            temp_dict = {}
+            temp_dict['data'] = jinjie_data
+            temp_dict['target'] = jinjieLabel
+            dataList.append(temp_dict)
+
+
+
+        
+        total_data = merge_data(dataList)
+        total_data = data_shuffle(total_data)  # 打乱数据样本 保证数据样本随机性
+        trainData, testData, trainLabel, testLabel = train_test_split(total_data['data'], total_data['target'],
+                                                                      test_size=0.4)
+
+
+        if len(total_data) > total_example_num:
+            print("validation finished total example num is {}".format(len(dataList)))
+            return dic,classif
+
+
+        minibatch_test_iterators = iter_minibatches(trainData, trainLabel)
+
+        testData_all.extend(testData)
+        testLabel_all.extend(testLabel)
+        print("测试集数据数量:  ", len(testData_all))
+        print("测试集标签数量:  ", len(testLabel_all))
+
+        # 每次测试前都进行一次测试数据的随机打乱
+        total_data['data'] = testData_all
+        total_data['target'] = testLabel_all
+        total_data = data_shuffle(total_data)
+        testData_all, testLabel_all = total_data['data'], total_data['target']
+
+        for i, (X_train, y_train) in enumerate(minibatch_test_iterators):
+            dictionary = iter_feature_selection_by_word2vecModel(model, X_train,
+                                                                 positiveWordList=['入门', '初学者', '通俗易懂', '基础'], topN=200,
+                                                                 useExistedModelPath='./online/word2vec.model')
+            print("word2vec:", dictionary)
+            print("word2vecLen: ", len(dictionary))
+
+            dic = dictionary
+            feaTest = word2vec(testData_all, dictionary)
+            feaTrain = word2vec(X_train, dictionary)
+
+            print("{} time".format(i))  # 当前次数
+
+            for cls_name, clf in partial_fit_classifiers.items():
+                print('_' * 80)
+                print("Training: ")
+                print(cls_name)
+                clf.partial_fit(feaTrain, y_train, classes=[1, 2])
+                scoring=['precision_micro','recall_micro','f1_micro','accuracy']
+                scores=cross_validate(clf,feaTrain,y_train,cv=5,scoring=scoring)
+                print(scores.keys())
+                print("train  accuracy: {}".format(scores['train_accuracy']))
+                print("test  accuracy: {}".format(scores['test_accuracy']))
+                print("train  f1:  {}".format(scores['train_f1_micro']))
+                print("test  f1:  {}".format(scores['test_f1_micro']))
+
+
+
+#利用PCA对数据进行降维可视化
+def data_visualization_PCA(X,y):
+
+    dictionary = iter_feature_selection_by_word2vecModel(None, None, positiveWordList=['入门', '初学者', '通俗易懂', '基础'],
+                                                         topN=200, useExistedModelPath='./online/word2vec.model')
+
+    fea=word2vec(X,dictionary)
+
+    pca=PCA(n_components=2)
+    reduce_X=pca.fit_transform(fea.todense())
+
+    class_1_x,class_1_y=[],[]
+    class_2_x,class_2_y=[],[]
+
+    for i in range(len(reduce_X)):
+        if y[i]==1:
+            class_1_x.append(reduce_X[i][0])
+            class_1_y.append(reduce_X[i][1])
+        else:
+            class_2_x.append(reduce_X[i][0])
+            class_2_y.append(reduce_X[i][1])
+
+
+    plt.scatter(class_1_x,class_1_y,c='r',marker='x')
+    plt.scatter(class_2_x,class_2_y,c='b',marker='o')
+
+    plt.show()
+
 if __name__ == '__main__':
-    iter_classifer()
+    #iter_classifer()
+    #build_word2vec_model()
+    #ross_validation()
+    rumen_data,rumen_target=get_data(collection_name='books',flag=1,limit_num=4)
+    jinjie_data,jinjie_target=get_data(collection_name='books',flag=2,limit_num=4)
+
+    X,y=[],[]
+
+    X.extend(rumen_data)
+    y.extend(rumen_target)
+    X.extend(jinjie_data)
+    y.extend(jinjie_target)
+
+    total={}
+    total['data']=X
+    total['target']=y
+
+
+
+    total=data_shuffle(total)
+
+    print("total data len : {}".format(len(total['data'])))
+
+
+    data_visualization_PCA(total['data'],total['target'])
